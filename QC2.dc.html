@@ -42,6 +42,7 @@
   }
   @keyframes qc2-pop { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
   @keyframes qc2-slide { from { opacity: 0; transform: translateX(-8px); } to { opacity: 1; transform: none; } }
+  @keyframes qc2-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
   .rail-pop { position: fixed; left: 222px; width: 268px; z-index: 46; animation: qc2-slide .16s ease both; }
   .only-small { display: none !important; }
@@ -80,6 +81,34 @@
   }
 </style>
 </helmet>
+
+<sc-if value="{{ busy }}" hint-placeholder-val="{{ false }}">
+  <div style="position:fixed;top:0;left:0;right:0;height:4px;background:rgba(242,193,78,0.2);z-index:9999">
+    <div style="height:100%;background:#f2c14e;width:{{ progressPct }}%;transition:width 0.2s ease;box-shadow:0 0 10px #f2c14e"></div>
+  </div>
+  <div class="no-print" style="position:fixed;inset:0;background:rgba(16,24,32,0.65);z-index:9000;display:flex;align-items:center;justify-content:center;padding:16px;backdrop-filter:blur(4px);animation:qc2-pop 0.2s ease">
+    <div class="card blueprint" style="width:100%;max-width:460px;padding:26px;background:#fff;display:flex;flex-direction:column;gap:18px;box-shadow:var(--shadow-lg);border:1px solid var(--color-accent-700)">
+      <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+      <div style="display:flex;align-items:center;gap:14px">
+        <div style="width:32px;height:32px;border:3px solid var(--color-accent-200);border-top-color:var(--color-accent-800);border-radius:50%;animation:qc2-spin 0.8s linear infinite;flex:none"></div>
+        <div style="display:flex;flex-direction:column;gap:3px;min-width:0">
+          <div style="font-family:var(--font-heading);font-weight:700;font-size:20px;letter-spacing:0.02em;color:var(--color-text);line-height:1.1">Memproses Data…</div>
+          <div style="font-size:13.5px;color:var(--color-neutral-700);line-height:1.3">{{ busy }}</div>
+        </div>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <div style="height:12px;background:var(--color-neutral-200);border-radius:6px;overflow:hidden;position:relative;padding:1px;border:1px solid var(--color-divider)">
+          <div style="height:100%;background:linear-gradient(90deg, var(--color-accent-700), #f2c14e);width:{{ progressPct }}%;transition:width 0.2s ease;border-radius:5px"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--color-neutral-700);font-weight:600">
+          <span>Harap tunggu, data sedang diproses</span>
+          <span style="font-family:var(--font-heading);font-size:14px;color:var(--color-accent-800)">{{ progressPct }}%</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</sc-if>
 
 <div class="rail-scrim no-print" onClick="{{ closeNav }}"></div>
 
@@ -1094,26 +1123,31 @@ class Component extends DCLogic {
     const file = e.target.files && e.target.files[0];
     e.target.value = '';
     if (!file) return;
-    this.setState({ busy: 'Reading ' + file.name, view: 'data' });
+    this.setState({ busy: 'Membaca ' + file.name + '…', progressPct: 20, view: 'data' });
     try {
       const incoming = /\.xlsx$/i.test(file.name)
         ? await this.S.parseXlsx(await file.arrayBuffer())
         : this.S.parseImport(await file.text(), file.name);
+      this.setState({ progressPct: 90 });
       this.stage(incoming, file.name);
     } catch (err) {
-      this.setState({ busy: '' });
+      this.setState({ busy: '', progressPct: 0 });
       this.toast('Could not read that file: ' + err.message);
     }
   }
 
   async loadArchive() {
-    this.setState({ busy: 'Loading archive…', view: 'data' });
+    this.setState({ busy: 'Mengunduh arsip QC2 (legacy workbook)…', progressPct: 15, view: 'data' });
     try {
       const res = await fetch('data/qc2-archive.json');
-      const incoming = this.S.parseImport(await res.text());
+      this.setState({ busy: 'Membaca data file arsip…', progressPct: 45 });
+      const text = await res.text();
+      this.setState({ busy: 'Memproses entri arsip database…', progressPct: 80 });
+      const incoming = this.S.parseImport(text);
+      this.setState({ progressPct: 100 });
       this.stage(incoming, 'QC2 archive (legacy workbook)');
     } catch (err) {
-      this.setState({ busy: '' });
+      this.setState({ busy: '', progressPct: 0 });
       this.toast('Archive not available: ' + err.message);
     }
   }
@@ -1121,23 +1155,29 @@ class Component extends DCLogic {
   stage(incoming, source) {
     this._incoming = incoming;
     const { records, report } = this.S.mergeRecords(this.state.records, incoming, { strategy: this.state.strategy });
-    this.setState({ busy: '', view: 'data', preview: { source, count: incoming.length, records, report } });
+    this.setState({ busy: '', progressPct: 0, view: 'data', preview: { source, count: incoming.length, records, report } });
   }
 
   async confirmMerge() {
     const p = this.state.preview;
-    this.setState({ busy: 'Merging…' });
+    this.setState({ busy: 'Menyiapkan gabung data…', progressPct: 5 });
     const before = new Map(this.state.records.map(r => [r.id, r]));
     const changed = p.records.filter(r => {
       const b = before.get(r.id);
       return !b || b.updatedAt !== r.updatedAt || b.batch !== r.batch;
     });
-    await this.S.putMany(changed, (done, total) =>
-      this.setState({ busy: `Merging ${this.n(done)} / ${this.n(total)}` }));
+    const totalItems = Math.max(1, changed.length);
+    await this.S.putMany(changed, (done, total) => {
+      const pct = Math.min(99, Math.max(5, Math.round((done / totalItems) * 100)));
+      this.setState({
+        busy: `Menyimpan & sinkronisasi database online ${this.n(done)} / ${this.n(totalItems)}`,
+        progressPct: pct,
+      });
+    });
     this.bump();
-    this.setState({ records: p.records, preview: null, busy: '', page: 0 });
+    this.setState({ records: p.records, preview: null, busy: '', progressPct: 0, page: 0 });
     this.log('merge', `${p.source}: +${this.n(p.report.added)} added, ${this.n(p.report.updated)} updated, ${this.n(p.report.skipped)} kept existing`);
-    this.toast('Merge applied');
+    this.toast('Merge applied & synced online');
   }
 
   async wipe() {
@@ -1276,6 +1316,7 @@ class Component extends DCLogic {
       crumb: view === 'records' ? `${this.n(rows.length)} of ${this.n(total)} entries` : '',
       title,
       busy: s.busy,
+      progressPct: typeof s.progressPct === 'number' ? s.progressPct : (s.busy ? 50 : 0),
       toast: s.toast,
       storageLine: `${this.n(total)} records held locally`,
       appVersion: `QC2 v${APP_VERSION}`,
