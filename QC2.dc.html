@@ -1169,17 +1169,30 @@ class Component extends DCLogic {
       return !b || b.updatedAt !== r.updatedAt || b.batch !== r.batch;
     });
     const totalItems = Math.max(1, changed.length);
-    await this.S.putMany(changed, (done, total) => {
-      const pct = Math.min(99, Math.max(5, Math.round((done / totalItems) * 100)));
-      this.setState({
-        busy: `Menyimpan & sinkronisasi database online ${this.n(done)} / ${this.n(totalItems)}`,
-        progressPct: pct,
+    let result = { syncedOnline: true, failedCount: 0 };
+    try {
+      result = await this.S.putMany(changed, (done, total) => {
+        const pct = Math.min(99, Math.max(5, Math.round((done / totalItems) * 100)));
+        this.setState({
+          busy: `Menyimpan & sinkronisasi database online ${this.n(done)} / ${this.n(totalItems)}`,
+          progressPct: pct,
+        });
       });
-    });
+    } catch (err) {
+      // putMany no longer throws for online-sync failures (only for a truly
+      // unexpected local error), but keep this belt-and-suspenders so the
+      // dialog can never again get stuck open indefinitely.
+      console.error('Merge sync error:', err);
+      result = { syncedOnline: false, failedCount: totalItems };
+    }
     this.bump();
     this.setState({ records: p.records, preview: null, busy: '', progressPct: 0, page: 0 });
     this.log('merge', `${p.source}: +${this.n(p.report.added)} added, ${this.n(p.report.updated)} updated, ${this.n(p.report.skipped)} kept existing`);
-    this.toast('Merge applied & synced online');
+    this.toast(
+      result.syncedOnline
+        ? 'Merge applied & synced online'
+        : `Merge saved on this device — ${this.n(result.failedCount)} record(s) still syncing online, will retry next time`
+    );
   }
 
   async wipe() {
@@ -1584,65 +1597,4 @@ class Component extends DCLogic {
       })(),
       batchMsgStyle: (() => {
         const b = s.form ? S.normBatch(s.form.batch) : '';
-        const bad = !b || (s.form && s.records.some(r => r.batch === b && r.id !== s.form.id));
-        return `font-size:12px;margin-top:5px;color:${bad ? 'var(--color-accent-800)' : 'var(--color-neutral-700)'}`;
-      })(),
-      setDate: e => this.setState(x => ({ form: { ...x.form, date: e.target.value } })),
-      setBox: e => this.setState(x => ({ form: { ...x.form, box: e.target.value } })),
-      setBatch: e => this.setState(x => ({ form: { ...x.form, batch: e.target.value } })),
-      setCode: e => this.setState(x => ({ form: { ...x.form, code: e.target.value } })),
-      setNote: e => this.setState(x => ({ form: { ...x.form, note: e.target.value } })),
-      closeForm: () => this.setState({ form: null }),
-      saveForm: () => this.saveForm(),
-      codeOptions: this._codes && this._codes.rev === (this._rev || 0)
-        ? this._codes.list
-        : (this._codes = { rev: this._rev || 0, list: [...new Set(s.records.map(r => r.code).filter(Boolean))].sort().slice(0, 400) }).list,
-
-      /* data */
-      isData: view === 'data',
-      exportJSON: () => this.exportJSON(),
-      exportCSV: () => this.exportCSV(),
-      onFile: e => this.onFile(e),
-      loadArchive: () => this.loadArchive(),
-      hasArchive: true,
-      strategyOpts: [
-        { key: 'newest', label: 'Newest wins' },
-        { key: 'incoming', label: 'File wins' },
-        { key: 'existing', label: 'Keep mine' },
-      ].map(o => ({
-        label: o.label, style: segStyle(s.strategy === o.key),
-        go: () => this.setState({ strategy: o.key }, () => {
-          if (this.state.preview && this._incoming) this.stage(this._incoming, this.state.preview.source);
-        }),
-      })),
-      preview: !!p,
-      previewTitle: p ? `Merge preview — ${p.source}` : '',
-      previewStats: p ? [
-        { label: 'In file', value: this.n(p.count) },
-        { label: 'New', value: this.n(rep.added) },
-        { label: 'Updated', value: this.n(rep.updated) },
-        { label: 'Unchanged / kept', value: this.n(rep.unchanged + rep.skipped) },
-      ] : [],
-      hasConflicts: !!(rep && rep.conflicts.length),
-      conflictLine: rep ? `${this.n(rep.conflicts.length)} differing batch numbers — showing first 8` : '',
-      conflicts: rep ? rep.conflicts.slice(0, 8).map(c => ({
-        batch: c.batch, kept: c.kept,
-        before: `${c.before.date || '—'} · ${c.before.box || '—'} · ${c.before.code || '—'}`,
-        after: `${c.after.date || '—'} · ${c.after.box || '—'} · ${c.after.code || '—'}`,
-      })) : [],
-      confirmMerge: () => this.confirmMerge(),
-      cancelMerge: () => this.setState({ preview: null }),
-      audit: s.audit.slice(0, 12).map(a => ({
-        when: (a.at || '').slice(0, 16).replace('T', ' '),
-        action: a.action, detail: a.detail,
-      })),
-      auditLine: s.audit.length ? `${this.n(s.audit.length)} events` : 'Nothing recorded yet',
-      wipe: () => this.wipe(),
-      wipeLabel: s.confirmWipe ? 'Tap again to erase everything' : 'Erase all records',
-    };
-  }
-}
-
-</script>
-</body>
-</html>
+        const bad = !b || (s.form && s.records.some(r => r.bat
