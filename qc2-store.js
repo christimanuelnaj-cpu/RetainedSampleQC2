@@ -208,7 +208,7 @@ async function logAuditLocal(e) {
 async function loadAuditLocal() {
   const d = await db();
   return new Promise((res, rej) => {
-    const t = d.transaction('audit', 'readonly').objectStore('audit').getAll();
+    const req = d.transaction('audit', 'readonly').objectStore('audit').getAll();
     req.onsuccess = () => res(req.result.sort((a, b) => b.at.localeCompare(a.at)));
     req.onerror = () => rej(req.error);
   });
@@ -248,26 +248,70 @@ export async function loadAll() {
   return loadAllLocal();
 }
 
-export async function putMany(records, onProgress) {
-  await putManyLocal(records, onProgress);
-  const fs = getFirestore();
-  if (fs) {
-    try {
-      const CHUNK = 400;
-      for (let i = 0; i < records.length; i += CHUNK) {
-        const slice = records.slice(i, i + CHUNK);
-        const batch = fs.batch();
-        for (const r of slice) {
-          const ref = fs.collection('records').doc(r.id);
-          batch.set(ref, r, { merge: true });
-        }
-        await batch.commit();
-        if (onProgress) onProgress(Math.min(i + CHUNK, records.length), records.length);
-      }
-    } catch (e) {
-      console.error('Firestore putMany error:', e);
+// A commit that never settles (dropped connection, backgrounded tab, mobile
+// network hiccup) would otherwise hang the whole merge forever with no error
+// and no way for the UI to know. This forces every commit to either finish
+// or fail within COMMIT_TIMEOUT_MS.
+function withTimeout(promise, ms, label) {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`Timed out after ${ms}ms: ${label}`)), ms);
+    promise.then(
+      v => { clearTimeout(t); resolve(v); },
+      e => { clearTimeout(t); reject(e); },
+    );
+  });
+}
+
+// Runs `tasks` (functions returning promises) with at most `limit` in
+// flight at once, instead of one strictly-sequential await per chunk.
+// For ~415 chunks this turns "415 round trips back-to-back" into
+// "415 round trips, 6 at a time" — both faster and far less exposed to
+// any single stalled request blocking everything behind it.
+async function runWithConcurrency(tasks, limit) {
+  let next = 0;
+  async function worker() {
+    while (next < tasks.length) {
+      const i = next++;
+      await tasks[i]();
     }
   }
+  await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, worker));
+}
+
+export async function putMany(records, onProgress) {
+  // Local copy first, always — this is the safety net. It already
+  // succeeded for your 165,746 records even while the cloud sync hung.
+  await putManyLocal(records, onProgress);
+
+  const fs = getFirestore();
+  if (!fs || !records.length) return { syncedOnline: true, failedCount: 0 };
+
+  const CHUNK = 400;
+  const CONCURRENCY = 6;
+  const COMMIT_TIMEOUT_MS = 25000;
+
+  const chunks = [];
+  for (let i = 0; i < records.length; i += CHUNK) chunks.push(records.slice(i, i + CHUNK));
+
+  let done = 0;
+  let failedCount = 0;
+  const tasks = chunks.map((slice, idx) => async () => {
+    const batch = fs.batch();
+    for (const r of slice) batch.set(fs.collection('records').doc(r.id), r, { merge: true });
+    try {
+      await withTimeout(batch.commit(), COMMIT_TIMEOUT_MS, `records chunk ${idx + 1}/${chunks.length}`);
+    } catch (e) {
+      console.error(`Firestore putMany: chunk ${idx + 1}/${chunks.length} failed/timed out — will not block the rest`, e);
+      failedCount += slice.length;
+      return;
+    }
+    done += slice.length;
+    if (onProgress) onProgress(Math.min(done, records.length), records.length);
+  });
+
+  await runWithConcurrency(tasks, CONCURRENCY);
+
+  return { syncedOnline: failedCount === 0, failedCount };
 }
 
 export async function removeRecord(id) {
