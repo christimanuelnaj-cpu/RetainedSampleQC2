@@ -1,0 +1,14 @@
+{
+  "name": "retained-sample-qc2",
+  "version": "1.0.0",
+  "description": "QC2 Retained Sample Database Application",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "build": "echo 'No build step required'"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
