@@ -3,6 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <script src="./support.js"></script>
 </head>
 <body>
@@ -813,11 +815,17 @@ class Component extends DCLogic {
       this.S.loadAll(), this.S.loadAudit(), this.S.getMeta('lastBackup'),
     ]);
     this.setState({ records, audit, lastBackup, ready: true });
+    if (this.S.subscribeRecords) {
+      this._unsubRecords = this.S.subscribeRecords(records => {
+        this.setState({ records, ready: true });
+      });
+    }
   }
 
   componentWillUnmount() {
     window.removeEventListener('keydown', this._key);
     clearTimeout(this._t); clearTimeout(this._nt);
+    if (this._unsubRecords) this._unsubRecords();
   }
 
   /* ---------- helpers ---------- */

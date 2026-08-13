@@ -80,7 +80,55 @@ function tx(store, mode, fn) {
   }));
 }
 
-export async function loadAll() {
+/* ---------- Firebase Firestore Cloud Integration ---------- */
+
+const FIREBASE_CONFIG = window.FIREBASE_WEBAPP_CONFIG || {
+  apiKey: "AIzaSyDvpnr8tKOocbfaQ95LVeIZfXmT8C4gPEM",
+  authDomain: "retainedsampleqc2.firebaseapp.com",
+  projectId: "retainedsampleqc2",
+  storageBucket: "retainedsampleqc2.firebasestorage.app",
+  messagingSenderId: "827092240429",
+  appId: "1:827092240429:web:77a82d12bc01aad53390a4"
+};
+
+let fsDb = null;
+function getFirestore() {
+  if (fsDb) return fsDb;
+  if (window.firebase && window.firebase.apps) {
+    try {
+      if (!window.firebase.apps.length) {
+        window.firebase.initializeApp(FIREBASE_CONFIG);
+      }
+      fsDb = window.firebase.firestore();
+    } catch (err) {
+      console.warn('Firebase init warning:', err);
+    }
+  }
+  return fsDb;
+}
+
+export function subscribeRecords(onChange) {
+  const fs = getFirestore();
+  if (!fs) return () => {};
+  try {
+    return fs.collection('records').onSnapshot(snap => {
+      const records = [];
+      snap.forEach(doc => {
+        const r = doc.data();
+        if (!r.deleted) records.push(r);
+      });
+      onChange(records);
+      putManyLocal(records).catch(() => {});
+    }, err => {
+      console.warn('Firestore snapshot error:', err);
+    });
+  } catch (e) {
+    return () => {};
+  }
+}
+
+/* Local IndexedDB helpers */
+async function loadAllLocal() {
   const d = await db();
   return new Promise((res, rej) => {
     const t = d.transaction('records', 'readonly');
@@ -90,7 +138,7 @@ export async function loadAll() {
   });
 }
 
-export async function putMany(records, onProgress) {
+async function putManyLocal(records, onProgress) {
   const d = await db();
   const CHUNK = 5000;
   for (let i = 0; i < records.length; i += CHUNK) {
@@ -106,31 +154,29 @@ export async function putMany(records, onProgress) {
   }
 }
 
-export async function removeRecord(id) {
+async function removeRecordLocal(id) {
   return tx('records', 'readwrite', s => s.delete(id));
 }
 
-export async function clearAll() {
+async function clearAllLocal() {
   await tx('records', 'readwrite', s => s.clear());
   await tx('audit', 'readwrite', s => s.clear());
 }
 
-export async function logAudit(entry) {
-  const e = { id: uid(), at: new Date().toISOString(), ...entry };
+async function logAuditLocal(e) {
   await tx('audit', 'readwrite', s => s.put(e));
-  return e;
 }
 
-export async function loadAudit() {
+async function loadAuditLocal() {
   const d = await db();
   return new Promise((res, rej) => {
-    const req = d.transaction('audit', 'readonly').objectStore('audit').getAll();
+    const t = d.transaction('audit', 'readonly').objectStore('audit').getAll();
     req.onsuccess = () => res(req.result.sort((a, b) => b.at.localeCompare(a.at)));
     req.onerror = () => rej(req.error);
   });
 }
 
-export async function getMeta(k) {
+async function getMetaLocal(k) {
   const d = await db();
   return new Promise((res, rej) => {
     const req = d.transaction('meta', 'readonly').objectStore('meta').get(k);
@@ -138,8 +184,134 @@ export async function getMeta(k) {
     req.onerror = () => rej(req.error);
   });
 }
-export async function setMeta(k, v) {
+
+async function setMetaLocal(k, v) {
   return tx('meta', 'readwrite', s => s.put({ k, v }));
+}
+
+/* Public data operations (Firestore Cloud + IndexedDB Sync) */
+
+export async function loadAll() {
+  const fs = getFirestore();
+  if (fs) {
+    try {
+      const snap = await fs.collection('records').get();
+      const records = [];
+      snap.forEach(doc => {
+        const r = doc.data();
+        if (!r.deleted) records.push(r);
+      });
+      putManyLocal(records).catch(() => {});
+      return records;
+    } catch (e) {
+      console.warn('Firestore loadAll failed, fallback to local storage:', e);
+    }
+  }
+  return loadAllLocal();
+}
+
+export async function putMany(records, onProgress) {
+  await putManyLocal(records, onProgress);
+  const fs = getFirestore();
+  if (fs) {
+    try {
+      const CHUNK = 400;
+      for (let i = 0; i < records.length; i += CHUNK) {
+        const slice = records.slice(i, i + CHUNK);
+        const batch = fs.batch();
+        for (const r of slice) {
+          const ref = fs.collection('records').doc(r.id);
+          batch.set(ref, r, { merge: true });
+        }
+        await batch.commit();
+        if (onProgress) onProgress(Math.min(i + CHUNK, records.length), records.length);
+      }
+    } catch (e) {
+      console.error('Firestore putMany error:', e);
+    }
+  }
+}
+
+export async function removeRecord(id) {
+  await removeRecordLocal(id);
+  const fs = getFirestore();
+  if (fs) {
+    try {
+      await fs.collection('records').doc(id).delete();
+    } catch (e) {
+      console.error('Firestore removeRecord error:', e);
+    }
+  }
+}
+
+export async function clearAll() {
+  await clearAllLocal();
+  const fs = getFirestore();
+  if (fs) {
+    try {
+      const snap = await fs.collection('records').get();
+      const batch = fs.batch();
+      snap.forEach(doc => batch.delete(doc.ref));
+      await batch.commit();
+
+      const auditSnap = await fs.collection('audit').get();
+      const auditBatch = fs.batch();
+      auditSnap.forEach(doc => auditBatch.delete(doc.ref));
+      await auditBatch.commit();
+    } catch (e) {
+      console.error('Firestore clearAll error:', e);
+    }
+  }
+}
+
+export async function logAudit(entry) {
+  const e = { id: uid(), at: new Date().toISOString(), ...entry };
+  await logAuditLocal(e);
+  const fs = getFirestore();
+  if (fs) {
+    try {
+      await fs.collection('audit').doc(e.id).set(e);
+    } catch (err) {
+      console.error('Firestore logAudit error:', err);
+    }
+  }
+  return e;
+}
+
+export async function loadAudit() {
+  const fs = getFirestore();
+  if (fs) {
+    try {
+      const snap = await fs.collection('audit').orderBy('at', 'desc').limit(100).get();
+      const audit = [];
+      snap.forEach(doc => audit.push(doc.data()));
+      if (audit.length > 0) return audit;
+    } catch (e) {
+      console.warn('Firestore loadAudit failed, fallback to local:', e);
+    }
+  }
+  return loadAuditLocal();
+}
+
+export async function getMeta(k) {
+  const fs = getFirestore();
+  if (fs) {
+    try {
+      const doc = await fs.collection('meta').doc(k).get();
+      if (doc.exists) return doc.data().v;
+    } catch (e) {}
+  }
+  return getMetaLocal(k);
+}
+
+export async function setMeta(k, v) {
+  await setMetaLocal(k, v);
+  const fs = getFirestore();
+  if (fs) {
+    try {
+      await fs.collection('meta').doc(k).set({ k, v });
+    } catch (e) {}
+  }
 }
 
 /* ---------- export / import ---------- */
