@@ -80,33 +80,71 @@ function tx(store, mode, fn) {
   }));
 }
 
-/* ---------- Firebase Firestore Cloud Integration ---------- */
+/* ---------- Firebase Cloud Integration (Firestore + Realtime Database) ---------- */
 
-const FIREBASE_CONFIG = window.FIREBASE_WEBAPP_CONFIG || {
-  apiKey: "AIzaSyDvpnr8tKOocbfaQ95LVeIZfXmT8C4gPEM",
-  authDomain: "retainedsampleqc2.firebaseapp.com",
-  projectId: "retainedsampleqc2",
-  storageBucket: "retainedsampleqc2.firebasestorage.app",
-  messagingSenderId: "827092240429",
-  appId: "1:827092240429:web:77a82d12bc01aad53390a4"
-};
+const FIREBASE_CONFIG = window.FIREBASE_WEBAPP_CONFIG
+  ? { ...window.FIREBASE_WEBAPP_CONFIG, databaseURL: 'https://retainedsampleqc2-default-rtdb.asia-southeast1.firebasedatabase.app' }
+  : {
+    apiKey: "AIzaSyDvpnr8tKOocbfaQ95LVeIZfXmT8C4gPEM",
+    authDomain: "retainedsampleqc2.firebaseapp.com",
+    projectId: "retainedsampleqc2",
+    storageBucket: "retainedsampleqc2.firebasestorage.app",
+    messagingSenderId: "827092240429",
+    appId: "1:827092240429:web:77a82d12bc01aad53390a4",
+    databaseURL: "https://retainedsampleqc2-default-rtdb.asia-southeast1.firebasedatabase.app"
+  };
 
+let _app = null;
 let fsDb = null;
+let rtDb = null;
+
+function getApp() {
+  if (_app) return _app;
+  if (!window.firebase) return null;
+  try {
+    _app = window.firebase.apps.length
+      ? window.firebase.app()
+      : window.firebase.initializeApp(FIREBASE_CONFIG);
+  } catch (err) {
+    console.warn('Firebase init warning:', err);
+  }
+  return _app;
+}
+
 function getFirestore() {
   if (fsDb) return fsDb;
-  if (window.firebase && window.firebase.apps) {
-    try {
-      if (!window.firebase.apps.length) {
-        window.firebase.initializeApp(FIREBASE_CONFIG);
-      }
-      fsDb = window.firebase.firestore();
-    } catch (err) {
-      console.warn('Firebase init warning:', err);
-    }
-  }
+  const app = getApp();
+  if (!app) return null;
+  try { fsDb = window.firebase.firestore(app); } catch (e) {}
   return fsDb;
 }
 
+function getRTDB() {
+  if (rtDb) return rtDb;
+  const app = getApp();
+  if (!app || !window.firebase.database) return null;
+  try { rtDb = window.firebase.database(app); } catch (e) {}
+  return rtDb;
+}
+
+// Track this client's online presence in Realtime Database
+export function initPresence() {
+  const db = getRTDB();
+  if (!db) return;
+  try {
+    const connRef = db.ref('.info/connected');
+    const presenceRef = db.ref('presence/' + uid());
+    connRef.on('value', snap => {
+      if (!snap.val()) return;
+      presenceRef.onDisconnect().remove();
+      presenceRef.set({ online: true, at: new Date().toISOString() });
+    });
+  } catch (e) {
+    console.warn('Presence init failed:', e);
+  }
+}
+
+// Real-time records subscription — uses Firestore onSnapshot
 export function subscribeRecords(onChange) {
   const fs = getFirestore();
   if (!fs) return () => {};
