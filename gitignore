@@ -1,0 +1,9 @@
+.thumbnail
+.DS_Store
+Thumbs.db
+node_modules/
+
+# Firebase Admin SDK service account keys — NEVER commit these.
+# They grant full read/write access to your entire Firebase project.
+serviceAccountKey*.json
+*-firebase-adminsdk-*.json
