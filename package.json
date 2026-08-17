@@ -1,14 +1,13 @@
 {
-  "name": "retained-sample-qc2",
-  "version": "1.0.0",
-  "description": "QC2 Retained Sample Database Application",
-  "main": "server.js",
-  "type": "module",
-  "scripts": {
-    "start": "node server.js",
-    "build": "echo 'No build step required'"
-  },
+  "name": "functions",
+  "description": "Scheduled Cloud Functions for RetainedSampleQC2 (weekly meta/stats rebuild)",
   "engines": {
-    "node": ">=18.0.0"
-  }
+    "node": "20"
+  },
+  "main": "index.js",
+  "dependencies": {
+    "firebase-admin": "^12.6.0",
+    "firebase-functions": "^5.0.1"
+  },
+  "private": true
 }

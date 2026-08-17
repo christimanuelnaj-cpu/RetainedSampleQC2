@@ -1,0 +1,11 @@
+# Never commit credentials
+serviceAccountKey*.json
+*.serviceaccount.json
+
+# Cloud Functions dependencies — installed fresh on deploy, don't need to be in git
+functions/node_modules/
+functions/.env
+functions/.env.*
+
+# Editor/OS noise
+.DS_Store
