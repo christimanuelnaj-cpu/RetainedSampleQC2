@@ -266,25 +266,57 @@ function sortFieldFor(sort) {
 }
 
 // Prefix search across the three code-like fields, merged and de-duped.
-async function queryByPrefix(fs, needle, { group, from, to }) {
+// Per-field fetch cap for prefix search. Firestore range queries can't be
+// combined with a date range on a *different* field, so the date window is
+// applied in memory after the fetch — meaning a very broad prefix can hit
+// this cap before the window narrows it. We report that back so the UI can
+// tell the user their search was truncated instead of silently lying.
+const SEARCH_CAP = 1500;
+
+/**
+ * Builds the case variants worth querying for a field. `batch` is stored
+ * normalized to uppercase (see makeRecord), but `box` and `code` are
+ * stored exactly as typed — so a lowercase search would silently miss
+ * uppercase data. Firestore has no case-insensitive range query, so we
+ * fan out across the plausible casings instead.
+ */
+function caseVariants(needle) {
+  const seen = new Set();
+  const out = [];
+  for (const v of [needle, needle.toUpperCase(), needle.toLowerCase()]) {
+    if (v && !seen.has(v)) { seen.add(v); out.push(v); }
+  }
+  return out;
+}
+
+async function queryByPrefix(fs, needle, { group, from, to, since }) {
   const upper = needle.toUpperCase();
-  const fields = [
-    ['batch', upper],
-    ['code', needle],
-    ['box', needle],
-  ];
+
+  // batch is normalized uppercase on write, so one variant suffices.
+  // box/code are stored as-typed, so try each plausible casing.
+  const pairs = [['batch', upper]];
+  for (const v of caseVariants(needle)) {
+    pairs.push(['code', v]);
+    pairs.push(['box', v]);
+  }
+
+  let truncated = false;
 
   const snaps = await Promise.all(
-    fields.map(([field, value]) =>
+    pairs.map(([field, value]) =>
       fs.collection('records')
         .orderBy(field)
         .startAt(value)
         .endAt(value + PREFIX_END)
-        .limit(500)
+        .limit(SEARCH_CAP)
         .get()
+        .then(snap => {
+          if (snap.size >= SEARCH_CAP) truncated = true;
+          return snap;
+        })
         .catch(err => {
           console.warn(`Prefix query on "${field}" failed:`, err.message || err);
-          return { forEach: () => {} };
+          return { forEach: () => {}, size: 0 };
         })
     )
   );
@@ -297,13 +329,49 @@ async function queryByPrefix(fs, needle, { group, from, to }) {
     });
   }
 
-  // Apply the remaining filters in memory — safe here because this set is
-  // already bounded to at most ~1500 rows by the limits above.
+  // Remaining filters applied in memory — bounded by the caps above.
   let out = [...byId.values()];
   if (group && group !== 'All') out = out.filter(r => r.group === group);
+  if (since) out = out.filter(r => r.date && r.date >= since);
   if (from) out = out.filter(r => r.date && r.date >= from);
   if (to) out = out.filter(r => r.date && r.date <= to);
-  return out;
+
+  // Newest first — far more useful default relevance than "lowest batch
+  // number alphabetically", which is what the raw query order gives.
+  out.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+
+  return { rows: out, truncated };
+}
+
+/**
+ * Converts a search-window preset (in days) into an ISO date floor.
+ * `0`/falsy means "no limit — search everything".
+ */
+export function sinceFromDays(days) {
+  const d = Number(days);
+  if (!d || d <= 0) return '';
+  const t = new Date();
+  t.setDate(t.getDate() - d);
+  return t.toISOString().slice(0, 10);
+}
+
+/**
+ * Quick-search used by the ⌘K palette. Returns a small, newest-first set
+ * plus the total match count within the window. Kept separate from
+ * queryRecords so the palette can stay lightweight and doesn't disturb
+ * the Records page's own paging state.
+ */
+export async function quickSearch(needle, { days = 365, limit = 12 } = {}) {
+  const fs = getFirestore();
+  const v = (needle || '').trim();
+  if (!fs || !v) return { rows: [], total: 0, truncated: false };
+  try {
+    const { rows, truncated } = await queryByPrefix(fs, v, { since: sinceFromDays(days) });
+    return { rows: rows.slice(0, limit), total: rows.length, truncated };
+  } catch (e) {
+    console.warn('quickSearch failed:', e.message || e);
+    return { rows: [], total: 0, truncated: false };
+  }
 }
 
 /**
@@ -315,7 +383,7 @@ async function queryByPrefix(fs, needle, { group, from, to }) {
  */
 export async function queryRecords({
   q = '', group = 'All', from = '', to = '', sort = 'date-desc',
-  pageSize = 100, cursor = null, status = '',
+  pageSize = 100, cursor = null, status = '', searchDays = 365,
 } = {}) {
   const fs = getFirestore();
   if (!fs) return { rows: [], nextCursor: null, exhausted: true, mode: 'local' };
@@ -323,14 +391,15 @@ export async function queryRecords({
   const needle = (q || '').trim();
 
   if (needle) {
-    const rows = await queryByPrefix(fs, needle, { group, from, to });
+    const since = sinceFromDays(searchDays);
+    const { rows, truncated } = await queryByPrefix(fs, needle, { group, from, to, since });
     const filtered = status ? rows.filter(r => (r.status || 'ok') === status) : rows;
     const [field, dir] = sortFieldFor(sort);
     filtered.sort((a, b) => {
       const av = a[field] || '', bv = b[field] || '';
       return dir === 'desc' ? bv.localeCompare(av) : av.localeCompare(bv);
     });
-    return { rows: filtered, nextCursor: null, exhausted: true, mode: 'prefix' };
+    return { rows: filtered, nextCursor: null, exhausted: true, mode: 'prefix', truncated, since };
   }
 
   // Browse path: equality on group, range on date, cursor pagination.
@@ -665,11 +734,19 @@ export async function putMany(records, onProgress, opts = {}) {
       for (const r of records) batch.set(fs.collection('records').doc(r.id), r, { merge: true });
       await withTimeout(batch.commit(), 60000, 'small batch commit');
       putManyLocal(records).catch(() => {}); // cache locally after success
-      if (opts.isNew) {
+      if (opts.isNew || opts.statusDelta) {
         try {
           const FV = window.firebase.firestore.FieldValue;
-          const update = { total: FV.increment(records.length) };
-          for (const r of records) update[`groups.${r.group}`] = FV.increment(1);
+          const update = {};
+          if (opts.isNew) {
+            update.total = FV.increment(records.length);
+            for (const r of records) update[`groups.${r.group}`] = FV.increment(1);
+          }
+          if (opts.statusDelta) {
+            for (const [st, delta] of Object.entries(opts.statusDelta)) {
+              if (delta) update[`statuses.${st}`] = FV.increment(delta);
+            }
+          }
           await fs.collection('meta').doc('stats').set(update, { merge: true });
         } catch (e) {
           console.warn('stats increment failed (non-fatal):', e.message || e);
@@ -726,14 +803,22 @@ export async function putMany(records, onProgress, opts = {}) {
   // from an update — a merge-write looks identical either way — so
   // guessing here would silently corrupt the count. Bulk imports write
   // the stats doc directly via rebuildStats() instead.
-  if (fs && failedCount === 0 && opts.isNew) {
+  if (fs && failedCount === 0 && (opts.isNew || opts.statusDelta)) {
     try {
       const FV = window.firebase.firestore.FieldValue;
-      const update = { total: FV.increment(records.length) };
-      const groupInc = {};
-      for (const r of records) groupInc[r.group] = (groupInc[r.group] || 0) + 1;
-      for (const [g, n] of Object.entries(groupInc)) {
-        update[`groups.${g}`] = FV.increment(n);
+      const update = {};
+      if (opts.isNew) {
+        update.total = FV.increment(records.length);
+        const groupInc = {};
+        for (const r of records) groupInc[r.group] = (groupInc[r.group] || 0) + 1;
+        for (const [g, n] of Object.entries(groupInc)) {
+          update[`groups.${g}`] = FV.increment(n);
+        }
+      }
+      if (opts.statusDelta) {
+        for (const [st, delta] of Object.entries(opts.statusDelta)) {
+          if (delta) update[`statuses.${st}`] = FV.increment(delta);
+        }
       }
       await fs.collection('meta').doc('stats').set(update, { merge: true });
     } catch (e) {
