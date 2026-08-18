@@ -1,0 +1,25 @@
+# Firebase App Hosting runtime config.
+#
+# WHY minInstances: 1
+# ────────────────────────────────────────────────────────────────────────
+# Without this file, App Hosting defaults to minInstances: 0, which lets
+# the Cloud Run backend scale all the way down when nobody is using it.
+# The next person to open the app then waits for a full cold start — the
+# container boots, Node starts, and only then does it serve QC2.dc.html,
+# support.js and qc2-store.js. On an idle backend that is the difference
+# between "instant" and "stares at an empty page for a minute".
+#
+# Since this is an internal tool used in bursts during the work day, the
+# backend is idle most of the time and therefore cold on almost every
+# first visit — exactly the case minInstances fixes.
+#
+# COST: one always-on instance. At this size (256 MiB / 0.5 vCPU) that is
+# a small fixed monthly cost rather than a per-request one. If that isn't
+# wanted, set this back to 0 and accept the cold start on first hit.
+
+runConfig:
+  minInstances: 1
+  maxInstances: 4
+  concurrency: 80
+  cpu: 1
+  memoryMiB: 512
