@@ -1,0 +1,15 @@
+{
+  "rules": {
+    "presence": {
+      ".read": true,
+      "$uid": {
+        ".write": true,
+        ".validate": "newData.hasChildren(['online', 'at']) && newData.child('online').isBoolean() && newData.child('at').isString()"
+      }
+    },
+    "$other": {
+      ".read": false,
+      ".write": false
+    }
+  }
+}

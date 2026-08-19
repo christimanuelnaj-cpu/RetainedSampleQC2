@@ -1,0 +1,50 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Schema guard for records/{id} writes. This is defense-in-depth, not
+    // the primary access control — App Check (configured at the Firebase
+    // project level) is what keeps this open-write model safe for an
+    // internal tool with no user login. What this DOES protect against:
+    // a bug in a future code change, or a malformed write from anywhere,
+    // corrupting a document in a way that crashes the UI elsewhere (e.g.
+    // status being a number instead of one of the 4 known strings breaks
+    // every STATUS_DLG[status] lookup in QC2.dc.html).
+    //
+    // Deliberately permissive on fields not central to the schema (box,
+    // batch, code, note, etc. just need to be strings) and on fields that
+    // may legitimately be absent on documents written before that field
+    // existed (location, group) — this only rejects writes that are
+    // actively wrong, not writes that are merely incomplete.
+    function validRecord() {
+      let d = request.resource.data;
+      return d.date is string
+        && d.box is string
+        && d.batch is string
+        && d.code is string
+        && (!('group' in d) || d.group in ['FG', 'SF', 'Filling'])
+        && (!('status' in d) || d.status in ['ok', 'borrowed', 'lost', 'destroyed'])
+        && (!('location' in d) || d.location in ['Plant 1', 'Plant 2'])
+        && (!('deleted' in d) || d.deleted is bool)
+        && (!('loans' in d) || d.loans is list);
+    }
+
+    match /records/{recordId} {
+      allow read: if true;
+      allow create, update: if validRecord();
+      allow delete: if true;
+    }
+    match /audit/{auditId} {
+      allow read, write: if true;
+    }
+    match /meta/{metaId} {
+      allow read, write: if true;
+    }
+
+    // No catch-all. Only the three collections above are ever used by this
+    // app — a wildcard match here would let anyone with the client config
+    // read, write, or create arbitrary OTHER collections with no schema
+    // constraint at all, which is pure unnecessary attack surface.
+  }
+}
